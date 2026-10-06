@@ -1,0 +1,1659 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Space Dive</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+    }
+    #gameCanvas {
+      display: block;
+      max-width: 100vw;
+      max-height: 100vh;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// ─── Canvas Setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const BASE_W = 360;
+const BASE_H = 640;
+let scale = 1;
+let canvasRect = { left: 0, top: 0 }; // getBoundingClientRect キャッシュ
+
+function resize() {
+  const wRatio = window.innerWidth  / BASE_W;
+  const hRatio = window.innerHeight / BASE_H;
+  scale = Math.min(wRatio, hRatio);
+  canvas.width  = BASE_W * scale;
+  canvas.height = BASE_H * scale;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  canvasRect = canvas.getBoundingClientRect();
+  bgGradCache  = null; // リサイズ時にグラデーションキャッシュを破棄
+  pipeGradCache = null;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+const SETTINGS_KEY = 'spacedive_settings';
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+    if (s) return s;
+  } catch (_) {}
+  return { seVolume: 0.8, bgBrightness: 0.5, uiAlpha: 1.0, skin: 'rocket', effect: 'fire' };
+}
+function saveSettings() {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+const settings = loadSettings();
+
+// ─── Compendium Data ─────────────────────────────────────────────────────────
+const COMPENDIUM_KEY = 'spacedive_compendium';
+
+const COMPENDIUM_DATA = [
+  {
+    key: 'earth',
+    name: '地球',
+    nameEn: 'EARTH',
+    color: '#4a9de0',
+    shadowColor: '#2266aa',
+    desc: '太陽から3番目の惑星。表面の約70%が海に覆われ、生命が存在すると確認されている唯一の天体。大気圏が有害な宇宙線から生命を守っている。',
+    fact: '直径 : 約12,742km  |  公転周期 : 365.25日',
+  },
+  {
+    key: 'moon',
+    name: '月',
+    nameEn: 'MOON',
+    color: '#c8c0a8',
+    shadowColor: '#888070',
+    desc: '地球の唯一の天然衛星。約45億年前に原始地球へ天体が衝突して生まれたと考えられている。潮汐力で地球の自転軸を安定させる重要な役割を持つ。',
+    fact: '地球からの距離 : 約38万km  |  公転周期 : 約27.3日',
+  },
+  {
+    key: 'saturn',
+    name: '土星',
+    nameEn: 'SATURN',
+    color: '#e8c840',
+    shadowColor: '#806020',
+    desc: '太陽系で2番目に大きな惑星。美しいリングは無数の氷と岩石の破片でできており、厚さはわずか数十m程度。密度が水より低く、水に浮く唯一の惑星。',
+    fact: '直径 : 約116,460km  |  衛星数 : 146個以上（太陽系最多）',
+  },
+  {
+    key: 'blackhole',
+    name: 'ブラックホール',
+    nameEn: 'BLACK HOLE',
+    color: '#ff6600',
+    shadowColor: '#aa2200',
+    desc: '重力が極めて強く、光すら脱出できない時空の領域。境界面を「事象の地平面」と呼ぶ。周囲のガスが螺旋を描いて落ちる降着円盤が橙色に輝いて見える。',
+    fact: '脱出速度 : 光速以上  |  近くでは時間の流れが著しく遅くなる',
+  },
+  {
+    key: 'cat',
+    name: '宇宙猫',
+    nameEn: 'SPACE CAT',
+    color: '#ffd080',
+    shadowColor: '#aa7020',
+    desc: '宇宙空間を漂う謎の猫。宇宙服のヘルメットを装着しているが、なぜここにいるのかは不明。目撃者はみな「なでたくなった」と証言している。遭遇は極めて稀。',
+    fact: 'レア度 : ★★★★★  |  なでると良いことがあるらしい',
+  },
+];
+
+function loadDiscovered() {
+  try {
+    const d = JSON.parse(localStorage.getItem(COMPENDIUM_KEY));
+    if (Array.isArray(d)) return new Set(d);
+  } catch (_) {}
+  return new Set();
+}
+function saveDiscovered() {
+  localStorage.setItem(COMPENDIUM_KEY, JSON.stringify([...discovered]));
+}
+function markDiscovered(key) {
+  if (!discovered.has(key)) {
+    discovered.add(key);
+    saveDiscovered();
+  }
+}
+const discovered = loadDiscovered();
+
+// 図鑑スクロール管理
+let compScroll    = 0;
+let compDragStartY = null;
+let compDragStartScroll = 0;
+
+// ─── Audio ───────────────────────────────────────────────────────────────────
+let audioCtx = null;
+
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freqs, duration, type = 'sine', gain = 0.18, fadeOut = 'exp') {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const vol = audioCtx.createGain();
+  osc.type = type;
+  osc.connect(vol);
+  vol.connect(audioCtx.destination);
+  const step = duration / freqs.length;
+  freqs.forEach((f, i) => osc.frequency.setValueAtTime(f, now + i * step));
+  const g = gain * settings.seVolume;
+  vol.gain.setValueAtTime(g, now);
+  if (fadeOut === 'exp') {
+    vol.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  } else {
+    vol.gain.linearRampToValueAtTime(0, now + duration);
+  }
+  osc.start(now);
+  osc.stop(now + duration);
+}
+
+function seBoost() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const bufLen = audioCtx.sampleRate * 0.08;
+  const buf = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) data[i] = (Math.random() * 2 - 1);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const bpf = audioCtx.createBiquadFilter();
+  bpf.type = 'bandpass';
+  bpf.frequency.value = 320;
+  bpf.Q.value = 1.2;
+  const vol = audioCtx.createGain();
+  vol.gain.setValueAtTime(0.22 * settings.seVolume, now);
+  vol.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+  src.connect(bpf); bpf.connect(vol); vol.connect(audioCtx.destination);
+  src.start(now); src.stop(now + 0.12);
+}
+
+function seScore() {
+  playTone([520, 680], 0.18, 'sine', 0.15, 'exp');
+}
+
+function seRankUp() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  [440, 550, 660, 880].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const vol = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    osc.connect(vol); vol.connect(audioCtx.destination);
+    const t = now + i * 0.1;
+    vol.gain.setValueAtTime(0, t);
+    vol.gain.linearRampToValueAtTime(0.18 * settings.seVolume, t + 0.02);
+    vol.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    osc.start(t); osc.stop(t + 0.18);
+  });
+}
+
+function seGameOver() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const vol = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(320, now);
+  osc.frequency.exponentialRampToValueAtTime(60, now + 0.7);
+  osc.connect(vol); vol.connect(audioCtx.destination);
+  vol.gain.setValueAtTime(0.22 * settings.seVolume, now);
+  vol.gain.exponentialRampToValueAtTime(0.0001, now + 0.75);
+  osc.start(now); osc.stop(now + 0.75);
+  const bufLen = audioCtx.sampleRate * 0.15;
+  const buf = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) d[i] = (Math.random() * 2 - 1);
+  const ns = audioCtx.createBufferSource();
+  ns.buffer = buf;
+  const nVol = audioCtx.createGain();
+  nVol.gain.setValueAtTime(0.3 * settings.seVolume, now);
+  nVol.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+  ns.connect(nVol); nVol.connect(audioCtx.destination);
+  ns.start(now); ns.stop(now + 0.15);
+}
+
+function seStart() {
+  playTone([330, 440, 550, 660], 0.3, 'triangle', 0.15, 'exp');
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const GRAVITY         = 0.35;
+const BOOST           = -7.5;
+const PIPE_SPEED_INIT = 2.8;
+const PIPE_GAP        = 160;
+const PIPE_WIDTH      = 52;
+const PIPE_INTERVAL   = 2400;
+const STAR_COUNT      = 80;
+
+// ─── State ───────────────────────────────────────────────────────────────────
+// state: 'title' | 'play' | 'dead' | 'settings'
+let state     = 'title';
+let score     = 0;
+let highScore = parseInt(localStorage.getItem('spacedive_hs') || '0');
+let pipeSpeed = PIPE_SPEED_INIT;
+let lastPipeTime = 0;
+
+// ─── Stars ───────────────────────────────────────────────────────────────────
+const starLayers = [
+  { stars: [], speed: 0.3, size: 1,   alpha: 0.4  },
+  { stars: [], speed: 0.7, size: 1.5, alpha: 0.65 },
+  { stars: [], speed: 1.4, size: 2,   alpha: 0.9  },
+];
+function initStars() {
+  starLayers.forEach(layer => {
+    layer.stars = [];
+    for (let i = 0; i < STAR_COUNT; i++) {
+      layer.stars.push({ x: Math.random() * BASE_W, y: Math.random() * BASE_H });
+    }
+  });
+}
+
+// ─── Background Objects ───────────────────────────────────────────────────────
+const BG_OBJ_TYPES   = ['earth', 'moon', 'saturn', 'blackhole', 'cat'];
+const BG_SPAWN_RATE  = 0.002; // フレームあたりのスポーン確率（約500fに1個）
+const BG_OBJ_SPEED   = 0.35;  // 星より遅い → 奥行き感
+
+let bgObjects = [];
+
+function spawnBgObject() {
+  const type = BG_OBJ_TYPES[Math.floor(Math.random() * BG_OBJ_TYPES.length)];
+  const r = 22 + Math.random() * 20;          // 半径 22〜42px
+  bgObjects.push({
+    type,
+    x: BASE_W + r + 10,
+    y: 40 + Math.random() * (BASE_H - 80),
+    r,
+    rot:      Math.random() * Math.PI * 2,
+    rotSpeed: (Math.random() - 0.5) * 0.008,
+    alpha:    0.65 + Math.random() * 0.3,
+  });
+}
+
+function updateBgObjects() {
+  // スポーン（play / title / dead / settings すべてで流れ続ける）
+  if (Math.random() < BG_SPAWN_RATE) spawnBgObject();
+
+  const moveSpeed = (state === 'play') ? BG_OBJ_SPEED : BG_OBJ_SPEED * 0.4;
+
+  for (let i = bgObjects.length - 1; i >= 0; i--) {
+    const o = bgObjects[i];
+    o.x   -= moveSpeed;
+    o.rot += o.rotSpeed;
+
+    // プレイ中に画面内に入ったら発見済みにする
+    if (state === 'play' && o.x < BASE_W && o.x > 0) {
+      markDiscovered(o.type);
+    }
+
+    if (o.x + o.r < -10) bgObjects.splice(i, 1);
+  }
+}
+
+// ─── Player ──────────────────────────────────────────────────────────────────
+const player = { x: 80, y: BASE_H / 2, vy: 0, w: 28, h: 20, alive: true, tilt: 0 };
+
+function resetPlayer() {
+  player.x = 80; player.y = BASE_H / 2;
+  player.vy = 0; player.tilt = 0; player.alive = true;
+}
+
+// ─── Pipes ───────────────────────────────────────────────────────────────────
+let pipes = [];
+
+function spawnPipe(now) {
+  const minTop = 60;
+  const maxTop = BASE_H - PIPE_GAP - 60;
+  const topH = minTop + Math.random() * (maxTop - minTop);
+  pipes.push({
+    x: BASE_W + PIPE_WIDTH,
+    topH,
+    botY: topH + PIPE_GAP,
+    botH: BASE_H - (topH + PIPE_GAP),
+    scored: false,
+  });
+  lastPipeTime = now;
+}
+
+// ─── Particles ───────────────────────────────────────────────────────────────
+let particles = [];
+
+function spawnParticles(x, y) {
+  const ef = settings.effect || 'fire';
+  for (let i = 0; i < 8; i++) {
+    const angle = Math.PI + (Math.random() - 0.5) * 1.2;
+    const speed = 1.5 + Math.random() * 3;
+    let hue, size, decay;
+
+    if (ef === 'fire') {
+      // オレンジ〜黄色の炎
+      hue   = 20 + Math.random() * 40;
+      size  = 2 + Math.random() * 3;
+      decay = 0.04 + Math.random() * 0.04;
+    } else if (ef === 'ice') {
+      // 青〜シアンの氷結
+      hue   = 180 + Math.random() * 40;
+      size  = 1.5 + Math.random() * 2.5;
+      decay = 0.03 + Math.random() * 0.03; // 少し長持ち
+    } else {
+      // rainbow: フレームごとに色相をシフト
+      hue   = Math.random() * 360;
+      size  = 2 + Math.random() * 3.5;
+      decay = 0.035 + Math.random() * 0.035;
+    }
+
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed + (Math.random() - 0.5) * 1.5,
+      life: 1,
+      decay,
+      size,
+      hue,
+      rainbow: ef === 'rainbow',
+    });
+  }
+}
+
+// ─── Rank ────────────────────────────────────────────────────────────────────
+function getRank(s) {
+  if (s >= 100) return { label: 'S', color: '#ff4dff', shadow: '#ff00ff' };
+  if (s >=  70) return { label: 'A', color: '#ffd700', shadow: '#ffaa00' };
+  if (s >=  50) return { label: 'B', color: '#00e5ff', shadow: '#00aaff' };
+  if (s >=  30) return { label: 'C', color: '#00ff90', shadow: '#00cc60' };
+  if (s >=  10) return { label: 'D', color: '#ff9933', shadow: '#cc6600' };
+  return              { label: 'E', color: '#aaaaaa', shadow: '#666666' };
+}
+
+// ─── Game Lifecycle ───────────────────────────────────────────────────────────
+function startGame() {
+  ensureAudio();
+  seStart();
+  resetPlayer();
+  pipes = []; particles = [];
+  score = 0;
+  pipeSpeed = PIPE_SPEED_INIT;
+  lastPipeTime = 0;
+  state = 'play';
+}
+
+function gameOver() {
+  state = 'dead';
+  player.alive = false;
+  seGameOver();
+  if (score > highScore) {
+    highScore = score;
+    localStorage.setItem('spacedive_hs', highScore);
+  }
+}
+
+function goTitle() {
+  state = 'title';
+  pipes = []; particles = [];
+}
+
+// ─── Update ──────────────────────────────────────────────────────────────────
+let tapThisFrame = false;
+
+function update(now) {
+  const speedMult = state === 'play' ? 1 : 0.4; // ループ外でキャッシュ（240回→1回の評価）
+  starLayers.forEach(layer => {
+    const dx = layer.speed * speedMult;
+    layer.stars.forEach(s => {
+      s.x -= dx;
+      if (s.x < 0) s.x = BASE_W;
+    });
+  });
+
+  // 背景オブジェクトは全 state で常に動かす
+  updateBgObjects();
+
+  if (state !== 'play') return;
+
+  pipeSpeed = PIPE_SPEED_INIT + score * 0.07;
+
+  if (now - lastPipeTime > PIPE_INTERVAL) spawnPipe(now);
+
+  if (tapThisFrame) {
+    player.vy = BOOST;
+    spawnParticles(player.x - player.w / 2, player.y);
+  }
+
+  player.vy += GRAVITY;
+  player.y  += player.vy;
+  player.tilt = Math.max(-0.5, Math.min(0.6, player.vy * 0.07));
+
+  if (player.y - player.h / 2 <= 0 || player.y + player.h / 2 >= BASE_H) {
+    gameOver(); return;
+  }
+
+  for (let i = pipes.length - 1; i >= 0; i--) {
+    const p = pipes[i];
+    p.x -= pipeSpeed;
+
+    if (!p.scored && p.x + PIPE_WIDTH < player.x) {
+      p.scored = true;
+      const prevRank = getRank(score).label;
+      score++;
+      if (getRank(score).label !== prevRank) seRankUp(); else seScore();
+    }
+
+    const margin = 4;
+    const pw = player.w / 2 - margin, ph = player.h / 2 - margin;
+    if (player.x + pw > p.x && player.x - pw < p.x + PIPE_WIDTH) {
+      if (player.y - ph < p.topH || player.y + ph > p.botY) {
+        gameOver(); return;
+      }
+    }
+
+    if (p.x + PIPE_WIDTH < -10) pipes.splice(i, 1);
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx; pt.y += pt.vy;
+    pt.vy += 0.1;
+    pt.life -= pt.decay;
+    if (pt.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ─── Draw: Background ────────────────────────────────────────────────────────
+let bgGradCache = null; // 毎フレーム生成しないようキャッシュ
+
+function drawBackground() {
+  if (!bgGradCache) {
+    bgGradCache = ctx.createLinearGradient(0, 0, 0, BASE_H);
+    bgGradCache.addColorStop(0,   '#03010f');
+    bgGradCache.addColorStop(0.5, '#060420');
+    bgGradCache.addColorStop(1,   '#020218');
+  }
+  ctx.fillStyle = bgGradCache;
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  const b = settings.bgBrightness;
+  if (b < 0.5) {
+    ctx.globalAlpha = (0.5 - b) * 1.4;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.globalAlpha = 1;
+  } else if (b > 0.5) {
+    ctx.globalAlpha = (b - 0.5) * 0.5;
+    ctx.fillStyle = '#1a0a4a';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawStars() {
+  // レイヤーごとに1つの beginPath にまとめて fill を1回だけ呼ぶ（240回→3回）
+  starLayers.forEach(layer => {
+    ctx.globalAlpha = layer.alpha;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    layer.stars.forEach(s => ctx.arc(s.x, s.y, layer.size, 0, Math.PI * 2));
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─── Draw: Background Objects ────────────────────────────────────────────────
+function drawEarth(r) {
+  // 海
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2);
+  const sea = ctx.createRadialGradient(-r*0.2, -r*0.3, r*0.05, 0, 0, r);
+  sea.addColorStop(0, '#66bbdd'); sea.addColorStop(1, '#115577');
+  ctx.fillStyle = sea; ctx.fill();
+  // 大陸
+  ctx.fillStyle = '#4a9955';
+  [[0.05,-0.25,r*0.42],[-0.38,0.15,r*0.28],[0.32,0.28,r*0.22]].forEach(([cx,cy,cr]) => {
+    ctx.beginPath(); ctx.arc(cx*r, cy*r, cr, 0, Math.PI*2); ctx.fill();
+  });
+  // 雲
+  ctx.fillStyle = 'rgba(255,255,255,0.52)';
+  [[-0.08,-0.52,r*0.28],[0.42,-0.08,r*0.19],[-0.45,0.32,r*0.21]].forEach(([cx,cy,cr]) => {
+    ctx.beginPath(); ctx.arc(cx*r, cy*r, cr, 0, Math.PI*2); ctx.fill();
+  });
+  // 縁グロー
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(100,200,255,0.4)'; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function drawMoon(r) {
+  // 本体
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2);
+  const mg = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.05, 0, 0, r);
+  mg.addColorStop(0, '#e8e4d8'); mg.addColorStop(1, '#7a7060');
+  ctx.fillStyle = mg; ctx.fill();
+  // クレーター
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  [[-0.28,-0.18,r*0.17],[0.22,0.28,r*0.13],[-0.08,0.36,r*0.10],[0.36,-0.32,r*0.09],[0.05,-0.50,r*0.07]].forEach(([cx,cy,cr]) => {
+    ctx.beginPath(); ctx.arc(cx*r, cy*r, cr, 0, Math.PI*2); ctx.fill();
+    // クレーター縁
+    ctx.beginPath(); ctx.arc(cx*r, cy*r, cr, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 0.8; ctx.stroke();
+  });
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(200,190,160,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawSaturn(r) {
+  const rg = (() => {
+    const g = ctx.createLinearGradient(-r*2.2, 0, r*2.2, 0);
+    g.addColorStop(0,   'rgba(210,180,100,0)');
+    g.addColorStop(0.15,'rgba(210,180,100,0.5)');
+    g.addColorStop(0.5, 'rgba(240,210,130,0.72)');
+    g.addColorStop(0.85,'rgba(210,180,100,0.5)');
+    g.addColorStop(1,   'rgba(210,180,100,0)');
+    return g;
+  })();
+  // リング後ろ半分
+  ctx.save(); ctx.scale(1, 0.30);
+  ctx.beginPath(); ctx.arc(0, 0, r*2.2, 0, Math.PI, true);
+  ctx.strokeStyle = rg; ctx.lineWidth = r*0.85; ctx.stroke();
+  ctx.restore();
+  // 本体
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2);
+  const sg = ctx.createRadialGradient(-r*0.25, -r*0.25, r*0.08, 0, 0, r);
+  sg.addColorStop(0, '#f5df98'); sg.addColorStop(0.6, '#c8a838'); sg.addColorStop(1, '#7a5818');
+  ctx.fillStyle = sg; ctx.fill();
+  // 縞
+  ctx.save(); ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.clip();
+  ctx.fillStyle = 'rgba(160,120,30,0.25)';
+  [-r*0.28, r*0.08, r*0.38].forEach(sy => ctx.fillRect(-r, sy, r*2, r*0.14));
+  ctx.restore();
+  // リング前半分
+  ctx.save(); ctx.scale(1, 0.30);
+  ctx.beginPath(); ctx.arc(0, 0, r*2.2, 0, Math.PI);
+  ctx.strokeStyle = rg; ctx.lineWidth = r*0.85; ctx.stroke();
+  ctx.restore();
+}
+
+function drawBlackhole(r) {
+  // 降着円盤（外輪）
+  ctx.save(); ctx.scale(1, 0.28);
+  const ag = ctx.createRadialGradient(0,0,r*0.85,0,0,r*2.6);
+  ag.addColorStop(0,   'rgba(255,160,20,0.95)');
+  ag.addColorStop(0.3, 'rgba(255,60,0,0.65)');
+  ag.addColorStop(0.65,'rgba(160,0,60,0.35)');
+  ag.addColorStop(1,   'rgba(60,0,20,0)');
+  ctx.beginPath(); ctx.arc(0,0,r*2.6,0,Math.PI*2);
+  ctx.fillStyle = ag; ctx.fill();
+  ctx.restore();
+  // 光子球リング
+  const lg = ctx.createRadialGradient(0,0,r*0.75,0,0,r*1.2);
+  lg.addColorStop(0,   'rgba(255,180,80,0)');
+  lg.addColorStop(0.55,'rgba(255,140,40,0.28)');
+  lg.addColorStop(1,   'rgba(255,80,0,0)');
+  ctx.beginPath(); ctx.arc(0,0,r*1.2,0,Math.PI*2);
+  ctx.fillStyle = lg; ctx.fill();
+  // 事象の地平面
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+  ctx.fillStyle = '#000000'; ctx.fill();
+  // オレンジグロー縁
+  ctx.shadowColor = '#ff7700'; ctx.shadowBlur = 18;
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+  ctx.strokeStyle = 'rgba(255,120,0,0.8)'; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawCat(r) {
+  const s = r / 22;
+  // しっぽ（体の後ろに）
+  ctx.strokeStyle = '#e8c87a'; ctx.lineWidth = r*0.13; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(r*0.5, r*0.25);
+  ctx.bezierCurveTo(r*0.95, r*0.05, r*0.9, -r*0.45, r*0.45, -r*0.52);
+  ctx.stroke();
+  // 体
+  ctx.beginPath(); ctx.ellipse(0, r*0.1, r*0.62, r*0.50, 0, 0, Math.PI*2);
+  ctx.fillStyle = '#e8c87a'; ctx.fill();
+  // 縞
+  ctx.strokeStyle = 'rgba(175,115,25,0.45)'; ctx.lineWidth = r*0.065; ctx.lineCap = 'butt';
+  [[-0.24,0.52,0.24,0.52],[-0.26,0.36,0.26,0.36],[-0.25,0.20,0.25,0.20]].forEach(([x1,y1,x2,y2]) => {
+    ctx.beginPath(); ctx.moveTo(x1*r,y1*r); ctx.lineTo(x2*r,y2*r); ctx.stroke();
+  });
+  // 頭
+  ctx.beginPath(); ctx.arc(0, -r*0.36, r*0.40, 0, Math.PI*2);
+  ctx.fillStyle = '#e8c87a'; ctx.fill();
+  // 耳
+  ctx.fillStyle = '#e8c87a';
+  [[-0.30,-0.68],[0.30,-0.68]].forEach(([ex,ey]) => {
+    ctx.beginPath();
+    ctx.moveTo(ex*r, ey*r);
+    ctx.lineTo((ex-0.15)*r,(ey-0.26)*r);
+    ctx.lineTo((ex+0.15)*r,(ey-0.26)*r);
+    ctx.closePath(); ctx.fill();
+  });
+  // 耳内側
+  ctx.fillStyle = '#ffaaaa';
+  [[-0.30,-0.68],[0.30,-0.68]].forEach(([ex,ey]) => {
+    ctx.beginPath();
+    ctx.moveTo(ex*r,(ey+0.02)*r);
+    ctx.lineTo((ex-0.08)*r,(ey-0.16)*r);
+    ctx.lineTo((ex+0.08)*r,(ey-0.16)*r);
+    ctx.closePath(); ctx.fill();
+  });
+  // 目
+  ctx.fillStyle = '#1a1a1a';
+  [[-0.15,-0.37],[0.15,-0.37]].forEach(([ex,ey]) => {
+    ctx.beginPath(); ctx.ellipse(ex*r,ey*r,r*0.075,r*0.10,0,0,Math.PI*2); ctx.fill();
+  });
+  // 目ハイライト
+  ctx.fillStyle = '#ffffff';
+  [[-0.12,-0.40],[0.18,-0.40]].forEach(([ex,ey]) => {
+    ctx.beginPath(); ctx.arc(ex*r,ey*r,r*0.028,0,Math.PI*2); ctx.fill();
+  });
+  // 鼻
+  ctx.fillStyle = '#ff8888';
+  ctx.beginPath(); ctx.arc(0,-r*0.27,r*0.058,0,Math.PI*2); ctx.fill();
+  // 口
+  ctx.strokeStyle = '#c06060'; ctx.lineWidth = 1.1*s; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0,-r*0.21); ctx.lineTo(-r*0.09,-r*0.13); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-r*0.21); ctx.lineTo( r*0.09,-r*0.13); ctx.stroke();
+  // ひげ
+  ctx.strokeStyle = 'rgba(255,255,255,0.72)'; ctx.lineWidth = 0.85*s;
+  [[-0.40,-0.28,-0.15,-0.28],[0.15,-0.28,0.40,-0.28],
+   [-0.42,-0.23,-0.15,-0.26],[0.15,-0.26,0.42,-0.23],
+   [-0.42,-0.33,-0.15,-0.30],[0.15,-0.30,0.42,-0.33]].forEach(([x1,y1,x2,y2]) => {
+    ctx.beginPath(); ctx.moveTo(x1*r,y1*r); ctx.lineTo(x2*r,y2*r); ctx.stroke();
+  });
+  // 宇宙ヘルメット
+  ctx.beginPath(); ctx.arc(0,-r*0.36,r*0.46,0,Math.PI*2);
+  ctx.strokeStyle = 'rgba(140,210,255,0.42)'; ctx.lineWidth = r*0.095;
+  ctx.shadowColor = '#88ddff'; ctx.shadowBlur = 10;
+  ctx.stroke(); ctx.shadowBlur = 0;
+}
+
+function drawBgObjects() {
+  bgObjects.forEach(o => {
+    ctx.save();
+    ctx.globalAlpha = o.alpha;
+    ctx.translate(o.x, o.y);
+    ctx.rotate(o.rot);
+    // キャッシュ済み OffscreenCanvas を drawImage 1回で描画
+    const pad = o.r * 3; // saturn/blackhole のリング・円盤が r の外にはみ出すため余白を確保
+    ctx.drawImage(o.cache, -pad, -pad);
+    ctx.restore();
+  });
+}
+
+// ─── BG Object Cache ─────────────────────────────────────────────────────────
+// スポーン時に OffscreenCanvas へ一度だけ描画してキャッシュ
+function createBgObjectCache(type, r) {
+  const pad  = r * 3; // はみ出し余白
+  const size = pad * 2;
+  const oc   = (typeof OffscreenCanvas !== 'undefined')
+    ? new OffscreenCanvas(size, size)
+    : (() => { const c = document.createElement('canvas'); c.width = size; c.height = size; return c; })();
+  const octx = oc.getContext('2d');
+  octx.translate(pad, pad); // 中心を (pad, pad) に
+  switch (type) {
+    case 'earth':     drawEarthOn(octx, r);     break;
+    case 'moon':      drawMoonOn(octx, r);      break;
+    case 'saturn':    drawSaturnOn(octx, r);    break;
+    case 'blackhole': drawBlackholeOn(octx, r); break;
+    case 'cat':       drawCatOn(octx, r);       break;
+  }
+  return oc;
+}
+
+// ─── Draw: Pipes ─────────────────────────────────────────────────────────────
+// パイプ本体グラデーションをキャッシュ（x 依存をなくすため translate を使う）
+let pipeGradCache = null;
+function getPipeGrad() {
+  if (!pipeGradCache) {
+    pipeGradCache = ctx.createLinearGradient(0, 0, PIPE_WIDTH, 0);
+    pipeGradCache.addColorStop(0,   '#005f60');
+    pipeGradCache.addColorStop(0.4, '#00c8c0');
+    pipeGradCache.addColorStop(1,   '#004848');
+  }
+  return pipeGradCache;
+}
+
+function drawPipes() {
+  pipes.forEach(p => {
+    ctx.save();
+    ctx.translate(p.x, 0); // translate で位置を移動 → グラデーションは (0,0)〜(PIPE_WIDTH,0) で固定
+    // shadowBlur 廃止 → 左右に細いハイライトラインで光彩感を代替
+    ctx.fillStyle = getPipeGrad();
+    // 上パイプ本体
+    ctx.fillRect(0, 0, PIPE_WIDTH, p.topH);
+    // 下パイプ本体
+    ctx.fillRect(0, p.botY, PIPE_WIDTH, p.botH);
+    // キャップ（明るいシアン）
+    ctx.fillStyle = '#00ffe0';
+    ctx.fillRect(-4, p.topH - 14, PIPE_WIDTH + 8, 14);
+    ctx.fillRect(-4, p.botY,      PIPE_WIDTH + 8, 14);
+    // キャップ上面ハイライト（shadowBlur 廃止の代替：1px 白ライン）
+    ctx.fillStyle = 'rgba(180,255,255,0.55)';
+    ctx.fillRect(-4, p.topH - 14, PIPE_WIDTH + 8, 2);
+    ctx.fillRect(-4, p.botY,      PIPE_WIDTH + 8, 2);
+    ctx.restore();
+  });
+}
+
+// ─── Draw: Skins ─────────────────────────────────────────────────────────────
+
+// スキン1: ロケット（デフォルト）
+function drawSkinRocket() {
+  // 胴体（shadowBlur 廃止 → コックピットの光彩1か所のみ）
+  ctx.beginPath();
+  ctx.moveTo(14,0); ctx.lineTo(-8,-8); ctx.lineTo(-14,0); ctx.lineTo(-8,8);
+  ctx.closePath();
+  const bg = ctx.createLinearGradient(-14,0,14,0);
+  bg.addColorStop(0,'#888'); bg.addColorStop(0.5,'#fff'); bg.addColorStop(1,'#aaa');
+  ctx.fillStyle = bg; ctx.fill();
+  // コックピット（最小限のグロー1か所）
+  ctx.beginPath(); ctx.arc(4,0,4.5,0,Math.PI*2);
+  ctx.fillStyle = '#00d4ff'; ctx.shadowColor = '#00d4ff'; ctx.shadowBlur = 6;
+  ctx.fill(); ctx.shadowBlur = 0;
+  // フィン
+  ctx.fillStyle = '#e03030';
+  [[-8,-8,-18,-18,-14,-4],[-8,8,-18,18,-14,4]].forEach(([x1,y1,x2,y2,x3,y3]) => {
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.lineTo(x3,y3);
+    ctx.closePath(); ctx.fill();
+  });
+}
+
+// スキン2: UFO
+function drawSkinUFO() {
+  // ドーム（shadowBlur 廃止）
+  ctx.beginPath(); ctx.ellipse(0,-3,10,7,0,Math.PI,0);
+  const dg = ctx.createLinearGradient(-10,-10,10,0);
+  dg.addColorStop(0,'#004433'); dg.addColorStop(0.5,'#00ffaa'); dg.addColorStop(1,'#002222');
+  ctx.fillStyle = dg; ctx.fill();
+  // 胴体（円盤）
+  ctx.beginPath(); ctx.ellipse(0,2,16,6,0,0,Math.PI*2);
+  const bg = ctx.createLinearGradient(-16,-4,16,8);
+  bg.addColorStop(0,'#113322'); bg.addColorStop(0.4,'#00dd88'); bg.addColorStop(1,'#112233');
+  ctx.fillStyle = bg; ctx.fill();
+  // 縁のライン
+  ctx.beginPath(); ctx.ellipse(0,2,16,6,0,0,Math.PI*2);
+  ctx.strokeStyle = '#00ffe0'; ctx.lineWidth = 1.5; ctx.stroke();
+  // 窓（shadowBlur 1か所のみ）
+  ctx.shadowColor = '#00ffff'; ctx.shadowBlur = 6;
+  [-8,0,8].forEach(wx => {
+    ctx.beginPath(); ctx.arc(wx,2,2,0,Math.PI*2);
+    ctx.fillStyle = '#00ffff'; ctx.fill();
+  });
+  ctx.shadowBlur = 0;
+}
+
+// スキン3: ドラゴン
+function drawSkinDragon() {
+  // 尾（shadowBlur 廃止）
+  ctx.fillStyle = '#cc2200';
+  ctx.beginPath(); ctx.moveTo(-14,0); ctx.lineTo(-20,-5); ctx.lineTo(-18,0); ctx.lineTo(-20,5); ctx.closePath(); ctx.fill();
+  // 胴体
+  const bg = ctx.createLinearGradient(-12,0,14,0);
+  bg.addColorStop(0,'#880000'); bg.addColorStop(0.5,'#ff4400'); bg.addColorStop(1,'#cc2200');
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.ellipse(0,0,14,8,0,0,Math.PI*2); ctx.fill();
+  // 背びれ
+  ctx.fillStyle = '#ff6600';
+  [[-4,-8,-1,-14,2,-8],[-2,-8,1,-11,4,-8]].forEach(([x1,y1,x2,y2,x3,y3]) => {
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.lineTo(x3,y3); ctx.closePath(); ctx.fill();
+  });
+  // 頭（shadowBlur 1か所のみ）
+  ctx.shadowColor = '#ff2200'; ctx.shadowBlur = 8;
+  ctx.fillStyle = '#ff3300';
+  ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(6,-6); ctx.lineTo(18,-3); ctx.lineTo(20,0); ctx.lineTo(18,3); ctx.lineTo(6,6); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  // 目
+  ctx.fillStyle = '#ffff00';
+  ctx.beginPath(); ctx.arc(15,-2,2,0,Math.PI*2); ctx.fill();
+}
+
+// スキン4: ステルス機
+function drawSkinStealth() {
+  // 主翼（shadowBlur 廃止）
+  const wg = ctx.createLinearGradient(-18,0,14,0);
+  wg.addColorStop(0,'#0a0020'); wg.addColorStop(0.6,'#5500aa'); wg.addColorStop(1,'#220044');
+  ctx.fillStyle = wg;
+  ctx.beginPath(); ctx.moveTo(12,0); ctx.lineTo(-6,-18); ctx.lineTo(-14,0); ctx.lineTo(-6,18); ctx.closePath(); ctx.fill();
+  // 中央胴体
+  ctx.fillStyle = '#8800ff';
+  ctx.beginPath(); ctx.moveTo(16,0); ctx.lineTo(2,-5); ctx.lineTo(-6,0); ctx.lineTo(2,5); ctx.closePath(); ctx.fill();
+  // ネオンエッジ（shadowBlur を 4 に削減）
+  ctx.strokeStyle = '#dd00ff'; ctx.lineWidth = 1; ctx.shadowColor = '#ff00ff'; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.moveTo(12,0); ctx.lineTo(-6,-18); ctx.lineTo(-14,0); ctx.lineTo(-6,18); ctx.closePath(); ctx.stroke();
+  ctx.shadowBlur = 0;
+  // コックピット
+  ctx.fillStyle = '#ff88ff';
+  ctx.beginPath(); ctx.ellipse(6,0,4,2.5,0,0,Math.PI*2); ctx.fill();
+}
+
+// スキン振り分け
+function drawRocket(x, y, tilt) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tilt);
+  switch (settings.skin) {
+    case 'ufo':     drawSkinUFO();     break;
+    case 'dragon':  drawSkinDragon();  break;
+    case 'stealth': drawSkinStealth(); break;
+    default:        drawSkinRocket();  break;
+  }
+  ctx.restore();
+}
+
+// ─── Draw: Particles ─────────────────────────────────────────────────────────
+function drawParticles() {
+  // shadowBlur 廃止 → 大きめ半透明円を重ねてグロー感を代替
+  // save/restore 廃止 → globalAlpha を手動リセット
+  particles.forEach(pt => {
+    const hue = pt.rainbow ? (pt.hue + (1 - pt.life) * 360) % 360 : pt.hue;
+    const r   = pt.size * pt.life;
+    const col = `hsl(${hue|0},100%,70%)`;
+    // 外側の薄いグロー円
+    ctx.globalAlpha = pt.life * 0.3;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r * 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    // 中央の実体円
+    ctx.globalAlpha = pt.life;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─── Draw: HUD ───────────────────────────────────────────────────────────────
+function drawHUD() {
+  const rank = getRank(score);
+  ctx.save();
+  ctx.globalAlpha = settings.uiAlpha;
+
+  // スコア（shadowBlur 廃止 → 2px オフセット影で視認性を維持）
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.font = 'bold 36px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(score, BASE_W / 2 + 2, 54);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(score, BASE_W / 2, 52);
+
+  // ランク（shadowBlur 18→6 に削減）
+  ctx.shadowColor = rank.shadow; ctx.shadowBlur = 6;
+  ctx.fillStyle = rank.color;
+  ctx.font = 'bold 30px "Courier New", monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  ctx.fillText(rank.label, BASE_W - 16, 14);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.font = '10px "Courier New", monospace';
+  ctx.fillText('RANK', BASE_W - 16, 46);
+
+  ctx.restore();
+}
+
+// ─── Draw: Title ─────────────────────────────────────────────────────────────
+let blinkTimer = 0;
+let blinkVisible = true;
+
+// ボタン定義（タイトル画面）
+const titleSettingsBtn    = { x: BASE_W/2 - 148, y: BASE_H/2 + 148, w: 134, h: 40 };
+const titleCompendiumBtn  = { x: BASE_W/2 + 14,  y: BASE_H/2 + 148, w: 134, h: 40 };
+let titleSettingsHover   = false;
+let titleCompendiumHover = false;
+
+function drawTitle(now) {
+  blinkTimer += 16;
+  if (blinkTimer > 500) { blinkVisible = !blinkVisible; blinkTimer = 0; }
+
+  ctx.save();
+
+  // ロゴ
+  ctx.save();
+  ctx.shadowColor = '#a020f0'; ctx.shadowBlur = 30;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 52px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SPACE', BASE_W / 2, BASE_H / 2 - 50);
+  ctx.fillStyle = '#a020f0';
+  ctx.font = 'bold 62px "Courier New", monospace';
+  ctx.fillText('DIVE', BASE_W / 2, BASE_H / 2 + 20);
+  ctx.restore();
+
+  // サブタイトル
+  ctx.save();
+  ctx.fillStyle = '#888';
+  ctx.font = '13px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Navigate through the cosmos', BASE_W / 2, BASE_H / 2 + 55);
+  ctx.restore();
+
+  // TAP TO START（点滅）
+  if (blinkVisible) {
+    ctx.save();
+    ctx.shadowColor = '#00ffe0'; ctx.shadowBlur = 15;
+    ctx.fillStyle = '#00ffe0';
+    ctx.font = 'bold 18px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('TAP TO START', BASE_W / 2, BASE_H / 2 + 110);
+    ctx.restore();
+  }
+
+  // SETTINGS ボタン
+  ctx.save();
+  ctx.shadowColor = titleSettingsHover ? '#00ffe0' : '#555555';
+  ctx.shadowBlur  = titleSettingsHover ? 16 : 6;
+  ctx.strokeStyle = titleSettingsHover ? '#00ffe0' : '#555555';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(titleSettingsBtn.x, titleSettingsBtn.y, titleSettingsBtn.w, titleSettingsBtn.h);
+  ctx.fillStyle = titleSettingsHover ? 'rgba(0,255,224,0.1)' : 'rgba(255,255,255,0.04)';
+  ctx.fillRect(titleSettingsBtn.x, titleSettingsBtn.y, titleSettingsBtn.w, titleSettingsBtn.h);
+  ctx.fillStyle = titleSettingsHover ? '#00ffe0' : '#888888';
+  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('⚙  SETTINGS',
+    titleSettingsBtn.x + titleSettingsBtn.w / 2,
+    titleSettingsBtn.y + titleSettingsBtn.h / 2);
+  ctx.restore();
+
+  // COMPENDIUM（図鑑）ボタン
+  const discCount = COMPENDIUM_DATA.filter(d => discovered.has(d.key)).length;
+  ctx.save();
+  ctx.shadowColor = titleCompendiumHover ? '#00ffe0' : '#446644';
+  ctx.shadowBlur  = titleCompendiumHover ? 16 : 6;
+  ctx.strokeStyle = titleCompendiumHover ? '#00ffe0' : '#446644';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(titleCompendiumBtn.x, titleCompendiumBtn.y, titleCompendiumBtn.w, titleCompendiumBtn.h);
+  ctx.fillStyle = titleCompendiumHover ? 'rgba(0,255,224,0.1)' : 'rgba(255,255,255,0.04)';
+  ctx.fillRect(titleCompendiumBtn.x, titleCompendiumBtn.y, titleCompendiumBtn.w, titleCompendiumBtn.h);
+  ctx.fillStyle = titleCompendiumHover ? '#00ffe0' : '#88aa88';
+  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('📖  図鑑',
+    titleCompendiumBtn.x + titleCompendiumBtn.w / 2,
+    titleCompendiumBtn.y + titleCompendiumBtn.h / 2 - 5);
+  // 発見数の小さい表示
+  ctx.fillStyle = discCount > 0 ? '#ffd700' : '#555566';
+  ctx.font = '10px "Courier New", monospace';
+  ctx.fillText(`${discCount}/${COMPENDIUM_DATA.length} 発見`,
+    titleCompendiumBtn.x + titleCompendiumBtn.w / 2,
+    titleCompendiumBtn.y + titleCompendiumBtn.h / 2 + 10);
+  ctx.restore();
+
+  // 操作ヒント
+  ctx.save();
+  ctx.fillStyle = '#444';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('[ TAP / SPACE / ↑ ] Boost', BASE_W / 2, BASE_H - 20);
+  ctx.restore();
+
+  ctx.restore(); // drawTitle
+}
+
+// ─── Draw: Game Over ─────────────────────────────────────────────────────────
+const retryBtn = { x: BASE_W/2 - 148, y: BASE_H/2 + 118, w: 134, h: 44 };
+const menuBtn  = { x: BASE_W/2 + 14,  y: BASE_H/2 + 118, w: 134, h: 44 };
+let retryHover = false;
+let menuHover  = false;
+
+function drawGameOver() {
+  const rank = getRank(score);
+
+  ctx.save();
+
+  // 暗幕
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.restore();
+
+  // GAME OVER
+  ctx.save();
+  ctx.shadowColor = '#ff3030'; ctx.shadowBlur = 30;
+  ctx.fillStyle = '#ff5050';
+  ctx.font = 'bold 46px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('GAME OVER', BASE_W / 2, BASE_H / 2 - 100);
+  ctx.restore();
+
+  // ランクバッジ
+  ctx.save();
+  ctx.shadowColor = rank.shadow; ctx.shadowBlur = 40;
+  ctx.fillStyle = rank.color;
+  ctx.font = 'bold 88px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(rank.label, BASE_W / 2, BASE_H / 2 - 22);
+  ctx.strokeStyle = rank.color; ctx.lineWidth = 2;
+  ctx.strokeRect(BASE_W/2 - 40, BASE_H/2 - 62, 80, 80);
+  ctx.restore();
+
+  // RANK ラベル
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '13px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText('RANK', BASE_W / 2, BASE_H / 2 + 32);
+  ctx.restore();
+
+  // スコア・ベスト
+  ctx.save();
+  ctx.font = 'bold 22px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 8;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`SCORE   ${score}`, BASE_W / 2, BASE_H / 2 + 64);
+  ctx.fillStyle = '#ffd700'; ctx.shadowColor = '#ffd700';
+  ctx.fillText(`BEST    ${highScore}`, BASE_W / 2, BASE_H / 2 + 94);
+  ctx.restore();
+
+  // RETRY ボタン
+  _drawBtn(retryBtn, 'RETRY', retryHover, '#a020f0');
+
+  // MENU ボタン
+  _drawBtn(menuBtn, 'MENU', menuHover, '#0088cc');
+
+  ctx.restore(); // drawGameOver
+}
+
+// ボタン描画ヘルパー
+function _drawBtn(btn, label, hover, baseColor) {
+  ctx.save();
+  ctx.shadowColor = hover ? '#00ffe0' : baseColor;
+  ctx.shadowBlur  = hover ? 24 : 14;
+  ctx.strokeStyle = hover ? '#00ffe0' : baseColor;
+  ctx.lineWidth = 2.5;
+  ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.fillStyle = hover ? 'rgba(0,255,224,0.15)' : `${baseColor}22`;
+  ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.fillStyle = hover ? '#00ffe0' : '#ffffff';
+  ctx.font = 'bold 18px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+  ctx.restore();
+}
+
+// ─── Draw: Settings Panel ────────────────────────────────────────────────────
+const SLIDERS = [
+  { key: 'seVolume',     label: 'SE VOLUME',  min: 0,   max: 1   },
+  { key: 'bgBrightness', label: 'BG BRIGHT',  min: 0,   max: 1   },
+  { key: 'uiAlpha',      label: 'UI OPACITY', min: 0.2, max: 1   },
+];
+
+// スキン・エフェクト定義
+const SKINS = [
+  { key: 'rocket',  label: 'ROCKET',  color: '#aaaaaa' },
+  { key: 'ufo',     label: 'UFO',     color: '#00ff88' },
+  { key: 'dragon',  label: 'DRAGON',  color: '#ff4400' },
+  { key: 'stealth', label: 'STEALTH', color: '#cc00ff' },
+];
+const EFFECTS = [
+  { key: 'fire',    label: 'FIRE',    color: '#ff8800' },
+  { key: 'ice',     label: 'ICE',     color: '#00ccff' },
+  { key: 'rainbow', label: 'RAINBOW', color: '#ff44ff' },
+];
+
+// パネルサイズ（スライダー3本 + スキン行 + エフェクト行を収める）
+const PNL_X  = BASE_W / 2 - 140;
+const PNL_Y  = BASE_H / 2 - 230;
+const PNL_W  = 280;
+const PNL_H  = 460;
+const SL_X   = PNL_X + 24;
+const SL_W   = PNL_W - 48;
+const SL_Y0  = PNL_Y + 90;
+const SL_STEP = 66;
+
+// スキン/エフェクトボタン行のY起点
+const SKIN_ROW_Y   = SL_Y0 + SLIDERS.length * SL_STEP + 18;
+const EFFECT_ROW_Y = SKIN_ROW_Y + 80;
+
+// ボタンサイズ計算（4列 or 3列）
+const SEL_BTN_H = 36;
+
+function selBtnRect(items, idx, rowY) {
+  const n   = items.length;
+  const gap = 6;
+  const bw  = (SL_W - gap * (n - 1)) / n;
+  return {
+    x: SL_X + idx * (bw + gap),
+    y: rowY,
+    w: bw,
+    h: SEL_BTN_H,
+  };
+}
+
+const settingsCloseBtn = { x: PNL_X + PNL_W - 38, y: PNL_Y + 8, w: 30, h: 30 };
+let draggingSlider = -1;
+
+function sliderY(i) { return SL_Y0 + i * SL_STEP; }
+
+// ─── 選択ボタン行の描画ヘルパー ───────────────────────────────────────────────
+function drawSelectRow(items, currentKey, rowY, sectionLabel) {
+  // セクションラベル
+  ctx.save();
+  ctx.fillStyle = '#aaaaaa';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(sectionLabel, SL_X, rowY - 10);
+  ctx.restore();
+
+  items.forEach((item, i) => {
+    const btn = selBtnRect(items, i, rowY);
+    const selected = item.key === currentKey;
+    ctx.save();
+    ctx.shadowColor = selected ? item.color : '#333333';
+    ctx.shadowBlur  = selected ? 14 : 4;
+    ctx.strokeStyle = selected ? item.color : '#444444';
+    ctx.lineWidth   = selected ? 2 : 1;
+    ctx.fillStyle   = selected ? `${item.color}33` : 'rgba(255,255,255,0.04)';
+    ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+    ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+    ctx.fillStyle   = selected ? item.color : '#777777';
+    ctx.font = `${selected ? 'bold ' : ''}10px "Courier New", monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(item.label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+    ctx.restore();
+  });
+}
+
+function drawSettings() {
+  // 背景暗幕
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.restore();
+
+  // パネル枠
+  ctx.save();
+  ctx.shadowColor = '#a020f0'; ctx.shadowBlur = 24;
+  ctx.fillStyle = 'rgba(8,4,28,0.95)';
+  ctx.fillRect(PNL_X, PNL_Y, PNL_W, PNL_H);
+  ctx.strokeStyle = '#a020f0'; ctx.lineWidth = 2;
+  ctx.strokeRect(PNL_X, PNL_Y, PNL_W, PNL_H);
+  ctx.restore();
+
+  // タイトル
+  ctx.save();
+  ctx.fillStyle = '#ffffff'; ctx.shadowColor = '#a020f0'; ctx.shadowBlur = 12;
+  ctx.font = 'bold 20px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('⚙  SETTINGS', PNL_X + PNL_W / 2, PNL_Y + 28);
+  ctx.restore();
+
+  // 区切り線ヘルパー
+  const drawDivider = (y) => {
+    ctx.save();
+    ctx.strokeStyle = '#330066'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PNL_X + 12, y); ctx.lineTo(PNL_X + PNL_W - 12, y);
+    ctx.stroke(); ctx.restore();
+  };
+  drawDivider(PNL_Y + 52);
+
+  // スライダー
+  SLIDERS.forEach((sl, i) => {
+    const val   = settings[sl.key];
+    const norm  = (val - sl.min) / (sl.max - sl.min);
+    const sy    = sliderY(i);
+    const knobX = SL_X + norm * SL_W;
+
+    ctx.save();
+    ctx.fillStyle = '#aaaaaa';
+    ctx.font = '11px "Courier New", monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText(sl.label, SL_X, sy - 10);
+    ctx.fillStyle = '#00ffe0'; ctx.textAlign = 'right';
+    ctx.fillText(Math.round(norm * 100) + '%', SL_X + SL_W, sy - 10);
+    ctx.restore();
+
+    ctx.save();
+    ctx.fillStyle = '#1a0a3a';
+    ctx.fillRect(SL_X, sy, SL_W, 6);
+    ctx.fillStyle = '#a020f0';
+    ctx.fillRect(SL_X, sy, norm * SL_W, 6);
+    ctx.shadowColor = '#00ffe0'; ctx.shadowBlur = 10;
+    ctx.fillStyle = draggingSlider === i ? '#00ffe0' : '#ffffff';
+    ctx.beginPath();
+    ctx.arc(knobX, sy + 3, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+
+  // 区切り線（スキン行の上）
+  drawDivider(SKIN_ROW_Y - 26);
+
+  // スキン選択ボタン行
+  drawSelectRow(SKINS,   settings.skin,   SKIN_ROW_Y,   'SKIN');
+
+  // 区切り線（エフェクト行の上）
+  drawDivider(EFFECT_ROW_Y - 26);
+
+  // エフェクト選択ボタン行
+  drawSelectRow(EFFECTS, settings.effect, EFFECT_ROW_Y, 'EFFECT');
+
+  // 閉じるボタン
+  ctx.save();
+  ctx.strokeStyle = '#666'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(settingsCloseBtn.x, settingsCloseBtn.y, settingsCloseBtn.w, settingsCloseBtn.h);
+  ctx.fillStyle = '#cc3333';
+  ctx.font = 'bold 16px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('✕',
+    settingsCloseBtn.x + settingsCloseBtn.w / 2,
+    settingsCloseBtn.y + settingsCloseBtn.h / 2);
+  ctx.restore();
+}
+
+// ─── Draw: Compendium (図鑑) ─────────────────────────────────────────────────
+const COMP_CARD_H    = 148;  // 1カードの高さ
+const COMP_CARD_GAP  = 12;
+const COMP_PAD_X     = 18;
+const COMP_CONTENT_W = BASE_W - COMP_PAD_X * 2;
+const COMP_CONTENT_Y = 68;   // ヘッダー下からスタート
+const COMP_ICON_R    = 28;   // カード内アイコン半径
+
+// 全カード合計高さ
+const COMP_TOTAL_H = COMPENDIUM_DATA.length * (COMP_CARD_H + COMP_CARD_GAP);
+// スクロール上限（コンテンツがはみ出す分だけ）
+function compMaxScroll() {
+  return Math.max(0, COMP_TOTAL_H - (BASE_H - COMP_CONTENT_Y - 16));
+}
+
+// カード内のミニアイコンを描画（drawXxx 関数を流用）
+function drawCompIcon(type, cx, cy, r) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  switch (type) {
+    case 'earth':     drawEarth(r);     break;
+    case 'moon':      drawMoon(r);      break;
+    case 'saturn':    drawSaturn(r);    break;
+    case 'blackhole': drawBlackhole(r); break;
+    case 'cat':       drawCat(r);       break;
+  }
+  ctx.restore();
+}
+
+function drawCompendium() {
+  // 背景暗幕
+  ctx.fillStyle = 'rgba(0,0,0,0.82)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  // ── ヘッダー ──────────────────────────────────────────────
+  ctx.save();
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#a020f0'; ctx.shadowBlur = 16;
+  ctx.font = 'bold 22px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('📖  COMPENDIUM', BASE_W / 2, 34);
+  ctx.restore();
+
+  // 発見数バッジ
+  const discCount = COMPENDIUM_DATA.filter(d => discovered.has(d.key)).length;
+  ctx.save();
+  ctx.fillStyle = '#ffd700'; ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 8;
+  ctx.font = '11px "Courier New", monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.fillText(`${discCount} / ${COMPENDIUM_DATA.length} 発見`, BASE_W - COMP_PAD_X, 34);
+  ctx.restore();
+
+  // 区切り線
+  ctx.save();
+  ctx.strokeStyle = '#330066'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(COMP_PAD_X, 54); ctx.lineTo(BASE_W - COMP_PAD_X, 54);
+  ctx.stroke(); ctx.restore();
+
+  // ── カードリスト（クリッピング） ──────────────────────────
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, COMP_CONTENT_Y, BASE_W, BASE_H - COMP_CONTENT_Y);
+  ctx.clip();
+
+  COMPENDIUM_DATA.forEach((entry, i) => {
+    const cardY = COMP_CONTENT_Y + i * (COMP_CARD_H + COMP_CARD_GAP) - compScroll;
+    // 画面外スキップ
+    if (cardY + COMP_CARD_H < COMP_CONTENT_Y || cardY > BASE_H) return;
+
+    const isFound = discovered.has(entry.key);
+
+    // カード背景
+    ctx.save();
+    ctx.shadowColor = isFound ? entry.shadowColor : '#222';
+    ctx.shadowBlur  = isFound ? 12 : 4;
+    ctx.fillStyle   = isFound ? 'rgba(20,10,40,0.92)' : 'rgba(10,8,20,0.88)';
+    ctx.strokeStyle = isFound ? entry.color : '#333344';
+    ctx.lineWidth   = isFound ? 1.5 : 1;
+    // 角丸風（fillRect + strokeRect）
+    ctx.fillRect(COMP_PAD_X, cardY, COMP_CONTENT_W, COMP_CARD_H);
+    ctx.strokeRect(COMP_PAD_X, cardY, COMP_CONTENT_W, COMP_CARD_H);
+    ctx.restore();
+
+    if (isFound) {
+      // ── 発見済みカード ──────────────────────────────────────
+      // アイコン領域（左側）
+      const iconCX = COMP_PAD_X + 44;
+      const iconCY = cardY + COMP_CARD_H / 2;
+      drawCompIcon(entry.type, iconCX, iconCY, COMP_ICON_R);
+
+      // 名前（日本語）
+      ctx.save();
+      ctx.fillStyle = entry.color;
+      ctx.shadowColor = entry.shadowColor; ctx.shadowBlur = 10;
+      ctx.font = 'bold 15px "Courier New", monospace';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      ctx.fillText(entry.name, COMP_PAD_X + 84, cardY + 26);
+      ctx.restore();
+
+      // 英語名（小さめ）
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.font = '10px "Courier New", monospace';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      ctx.fillText(entry.nameEn, COMP_PAD_X + 84, cardY + 40);
+      ctx.restore();
+
+      // 区切り
+      ctx.save();
+      ctx.strokeStyle = `${entry.color}44`; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(COMP_PAD_X + 84, cardY + 46);
+      ctx.lineTo(COMP_PAD_X + COMP_CONTENT_W - 8, cardY + 46);
+      ctx.stroke(); ctx.restore();
+
+      // 説明文（折り返し）
+      ctx.save();
+      ctx.fillStyle = 'rgba(220,215,240,0.85)';
+      ctx.font = '10px "Courier New", monospace';
+      ctx.textBaseline = 'alphabetic';
+      const descX    = COMP_PAD_X + 84;
+      const descMaxW = COMP_CONTENT_W - 84 - 8;
+      const words    = entry.desc.split('');
+      let line = ''; let lineY = cardY + 59;
+      for (const ch of words) {
+        const test = line + ch;
+        if (ctx.measureText(test).width > descMaxW && line.length > 0) {
+          ctx.fillText(line, descX, lineY);
+          line = ch; lineY += 13;
+          if (lineY > cardY + COMP_CARD_H - 28) { ctx.fillText(line + '…', descX, lineY); line = null; break; }
+        } else { line = test; }
+      }
+      if (line) ctx.fillText(line, descX, lineY);
+      ctx.restore();
+
+      // ファクト行
+      ctx.save();
+      ctx.fillStyle = `${entry.color}bb`;
+      ctx.font = '9px "Courier New", monospace';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      ctx.fillText(entry.fact, COMP_PAD_X + 8, cardY + COMP_CARD_H - 10);
+      ctx.restore();
+
+    } else {
+      // ── 未発見カード ────────────────────────────────────────
+      // ロックアイコン
+      ctx.save();
+      ctx.fillStyle = '#444455';
+      ctx.font = '28px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('🔒', COMP_PAD_X + 44, cardY + COMP_CARD_H / 2);
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = '#555566';
+      ctx.font = 'bold 16px "Courier New", monospace';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('???', COMP_PAD_X + 84, cardY + COMP_CARD_H / 2 - 10);
+      ctx.fillStyle = '#333344';
+      ctx.font = '11px "Courier New", monospace';
+      ctx.fillText('プレイ中に発見しよう', COMP_PAD_X + 84, cardY + COMP_CARD_H / 2 + 10);
+      ctx.restore();
+    }
+  });
+
+  ctx.restore(); // clip 解除
+
+  // ── スクロールバー ────────────────────────────────────────
+  const maxScroll = compMaxScroll();
+  if (maxScroll > 0) {
+    const trackH   = BASE_H - COMP_CONTENT_Y - 8;
+    const thumbH   = Math.max(30, trackH * (trackH / COMP_TOTAL_H));
+    const thumbY   = COMP_CONTENT_Y + (compScroll / maxScroll) * (trackH - thumbH);
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fillRect(BASE_W - 6, COMP_CONTENT_Y, 4, trackH);
+    ctx.fillStyle = 'rgba(160,80,240,0.7)';
+    ctx.fillRect(BASE_W - 6, thumbY, 4, thumbH);
+    ctx.restore();
+  }
+
+  // ── 閉じるボタン ─────────────────────────────────────────
+  ctx.save();
+  ctx.fillStyle = 'rgba(180,30,30,0.85)';
+  ctx.fillRect(BASE_W - 42, 8, 34, 28);
+  ctx.strokeStyle = '#cc3333'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(BASE_W - 42, 8, 34, 28);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('✕', BASE_W - 25, 22);
+  ctx.restore();
+}
+
+// 図鑑の閉じるボタン判定
+const compCloseBtn = { x: BASE_W - 42, y: 8, w: 34, h: 28 };
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+function getCanvasXY(e) {
+  // canvasRect は resize() 時にキャッシュ済み（毎イベントで DOM 問い合わせしない）
+  return {
+    mx: (e.clientX - canvasRect.left) / scale,
+    my: (e.clientY - canvasRect.top)  / scale,
+  };
+}
+
+function hitBtn(btn, mx, my) {
+  return mx >= btn.x && mx <= btn.x + btn.w && my >= btn.y && my <= btn.y + btn.h;
+}
+
+canvas.addEventListener('pointermove', (e) => {
+  const { mx, my } = getCanvasXY(e);
+
+  if (state === 'dead') {
+    retryHover = hitBtn(retryBtn, mx, my);
+    menuHover  = hitBtn(menuBtn,  mx, my);
+  }
+  if (state === 'title') {
+    titleSettingsHover    = hitBtn(titleSettingsBtn,   mx, my);
+    titleCompendiumHover  = hitBtn(titleCompendiumBtn, mx, my);
+  }
+  if (state === 'settings' && draggingSlider >= 0) {
+    const sl = SLIDERS[draggingSlider];
+    const norm = Math.max(0, Math.min(1, (mx - SL_X) / SL_W));
+    settings[sl.key] = sl.min + norm * (sl.max - sl.min);
+    saveSettings();
+  }
+  if (state === 'compendium' && compDragStartY !== null) {
+    const dy = compDragStartY - my;
+    compScroll = Math.max(0, Math.min(compMaxScroll(), compDragStartScroll + dy));
+  }
+});
+
+canvas.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  ensureAudio();
+  const { mx, my } = getCanvasXY(e);
+
+  // ─ compendium 画面 ─
+  if (state === 'compendium') {
+    if (hitBtn(compCloseBtn, mx, my)) {
+      state = 'title'; return;
+    }
+    // スクロールドラッグ開始
+    compDragStartY      = my;
+    compDragStartScroll = compScroll;
+    return;
+  }
+
+  // ─ settings 画面 ─
+  if (state === 'settings') {
+    if (hitBtn(settingsCloseBtn, mx, my)) {
+      state = 'title'; return;
+    }
+    // スライダー
+    SLIDERS.forEach((sl, i) => {
+      const sy = sliderY(i);
+      if (mx >= SL_X - 10 && mx <= SL_X + SL_W + 10 && my >= sy - 14 && my <= sy + 20) {
+        draggingSlider = i;
+        const norm = Math.max(0, Math.min(1, (mx - SL_X) / SL_W));
+        settings[sl.key] = sl.min + norm * (sl.max - sl.min);
+        saveSettings();
+      }
+    });
+    // スキン選択ボタン
+    SKINS.forEach((sk, i) => {
+      const btn = selBtnRect(SKINS, i, SKIN_ROW_Y);
+      if (hitBtn(btn, mx, my)) {
+        settings.skin = sk.key;
+        saveSettings();
+      }
+    });
+    // エフェクト選択ボタン
+    EFFECTS.forEach((ef, i) => {
+      const btn = selBtnRect(EFFECTS, i, EFFECT_ROW_Y);
+      if (hitBtn(btn, mx, my)) {
+        settings.effect = ef.key;
+        saveSettings();
+      }
+    });
+    return;
+  }
+
+  // ─ dead 画面 ─
+  if (state === 'dead') {
+    if (hitBtn(retryBtn, mx, my)) { startGame(); return; }
+    if (hitBtn(menuBtn,  mx, my)) { goTitle();   return; }
+    return;
+  }
+
+  // ─ title 画面 ─
+  if (state === 'title') {
+    if (hitBtn(titleSettingsBtn, mx, my)) {
+      state = 'settings'; return;
+    }
+    if (hitBtn(titleCompendiumBtn, mx, my)) {
+      compScroll = 0;
+      state = 'compendium'; return;
+    }
+    startGame(); return;
+  }
+
+  // ─ play 画面 ─
+  if (state === 'play') {
+    tapThisFrame = true;
+    seBoost();
+  }
+});
+
+canvas.addEventListener('pointerup',     () => { draggingSlider = -1; compDragStartY = null; });
+canvas.addEventListener('pointercancel', () => { draggingSlider = -1; compDragStartY = null; });
+
+canvas.addEventListener('wheel', (e) => {
+  if (state === 'compendium') {
+    e.preventDefault();
+    compScroll = Math.max(0, Math.min(compMaxScroll(), compScroll + e.deltaY * 0.5));
+  }
+}, { passive: false });
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape' && state === 'settings') {
+    state = 'title'; return;
+  }
+  if (e.code === 'Escape' && state === 'compendium') {
+    state = 'title'; return;
+  }
+  if (state === 'dead') {
+    if (e.code === 'Enter' || e.code === 'KeyR') startGame();
+    if (e.code === 'KeyM') goTitle();
+    return;
+  }
+  if (state === 'title' && e.code === 'KeyS') {
+    state = 'settings'; return;
+  }
+  if (state === 'title' && e.code === 'KeyC') {
+    compScroll = 0; state = 'compendium'; return;
+  }
+  if ((e.code === 'Space' || e.code === 'ArrowUp') && state === 'play') {
+    e.preventDefault();
+    tapThisFrame = true;
+    seBoost();
+  }
+  if ((e.code === 'Space' || e.code === 'ArrowUp') && state === 'title') {
+    e.preventDefault();
+    startGame();
+  }
+});
+
+// ─── Main Loop ───────────────────────────────────────────────────────────────
+let lastTimestamp = 0;
+
+function loop(timestamp) {
+  const dt = timestamp - lastTimestamp;
+  lastTimestamp = timestamp;
+
+  update(timestamp);
+
+  drawBackground();
+  drawStars();
+  drawBgObjects();  // 背景オブジェクト（星の手前、パイプの奥）
+
+  if (state === 'play' || state === 'dead') {
+    drawPipes();
+    drawParticles();
+    drawRocket(player.x, player.y, player.tilt);
+    drawHUD();
+    if (state === 'dead') drawGameOver();
+  }
+
+  if (state === 'title') {
+    drawTitle(timestamp);
+  }
+
+  if (state === 'settings') {
+    drawTitle(timestamp);  // タイトルを背景に
+    drawSettings();
+  }
+
+  if (state === 'compendium') {
+    drawTitle(timestamp);  // タイトルを背景に
+    drawCompendium();
+  }
+
+  tapThisFrame = false;
+  requestAnimationFrame(loop);
+}
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+initStars();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

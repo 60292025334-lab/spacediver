@@ -1,0 +1,11 @@
+{
+  // Cloudflare Workers 設定ファイル
+  "name": "spacediver",
+  "compatibility_date": "2024-09-23",
+
+  // 静的ファイルを Workers Static Assets として配信
+  "assets": {
+    "directory": "./",
+    "binding": "ASSETS"
+  }
+}
